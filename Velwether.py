@@ -1,145 +1,661 @@
 import requests
 import os
 import sys
+import pickle
+import configparser
+import shutil
+import pyfiglet
 
-os.system("cls")
 
-if os.path.isfile("config.ini")==False:
+# =========================================================
+# 画面クリア
+# =========================================================
+
+os.system("cls" if os.name == "nt" else "clear")
+
+
+# =========================================================
+# 定数
+# =========================================================
+
+
+CONFIG_DIR = "config"
+DATA_DIR = "data"
+
+CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
+CHAT_LOG_FILE = os.path.join(DATA_DIR, "memory.vlm")
+
+os.makedirs(CONFIG_DIR, exist_ok=True)
+os.makedirs(DATA_DIR, exist_ok=True)
+
+
+# =========================================================
+# 設定データなどの移行
+# =========================================================
+
+
+if os.path.isfile("config.ini"):
+    shutil.copyfile("config.ini",CONFIG_FILE)
+    os.remove("config.ini")
+    print("設定データを移行しました。")
+
+if os.path.isfile("memory.vlm"):
+    i=input(" 既存の記憶データを移行しますか? ( Y or N ) >> ")
+    if i.lower()=="Y":
+        if os.path.isfile(CHAT_LOG_FILE):
+            print("")
+            d=input(" 記憶データが既に存在します。上書きしますか? ( Y or N ) >> ")
+            if i.lower()=="Y":
+                shutil.copyfile("memory.vlm",CHAT_LOG_FILE)
+                os.remove("memory.vlm")
+            else:
+                print(" 上書きをキャンセルしました")
+        else:
+            shutil.copyfile("memory.vlm",CHAT_LOG_FILE)
+            os.remove("memory.vlm")
+    else:
+        print(" 記憶データの移行をキャンセルしました。")
+
+# =========================================================
+# config.ini チェック
+# =========================================================
+
+if not os.path.isfile(CONFIG_FILE):
     print(" config.iniファイルが見つかりません。")
+    print("")
+    print(" config.iniを作成してから、もう一度起動してください。")
     input(" >> ")
     sys.exit()
 
-import pickle
-def save_chat(messages,new_message):
-    messages.append(new_message)
-    with open("chat.log","wb") as f:
-        pickle.dump(messages,f)
 
-def load_chat(v,prompt):
-    if v.lower()=="y" and os.path.isfile("chat.log")==True:
-        with open("chat.log","rb") as f:
-            messages=pickle.load(f)
-        messages.append({'role': 'user', 'content': prompt})
-        return messages
-    else:
-        return [{'role':'system','content':'私のソフトウェアはあなたに代わってユーザー情報を保持します。'},{'role': 'user', 'content': prompt}]
+# =========================================================
+# 設定ファイル読み込み
+# =========================================================
 
 def load_config():
-    import configparser
-
     config = configparser.ConfigParser()
 
-    # 'config.ini' をUTF-8として読み込む
-    with open('config.ini', 'r', encoding='utf-8') as configfile:
+    with open(CONFIG_FILE, "r", encoding="utf-8") as configfile:
         config.read_file(configfile)
 
-    # デフォルトのAPIキーを取得
-    default_api_key = config['DEFAULT']['api_key']
+    return config
 
-    return default_api_key
+
+def load_model():
+    """
+    Ollamaで使用するモデル名を取得
+    """
+    config = load_config()
+
+    try:
+        return config["DEFAULT"]["model"]
+    except KeyError:
+        return "qwen3:1.7b"
+
+
+def load_ollama_url():
+    """
+    Ollama API URL
+    """
+    config = load_config()
+
+    try:
+        return config["DEFAULT"]["ollama_url"]
+    except KeyError:
+        return "http://localhost:11434/api/chat"
+
+
+def load_BotName():
+    """
+    Ollama Bot Name
+    """
+    config = load_config()
+
+    try:
+        return config["DEFAULT"]["bot_name"]
+    except KeyError:
+        return "ボット"
 
 def load_preload():
-    import configparser
+    """
+    起動時に自動で履歴を読み込むか
+    1 = 自動読み込み
+    0 = 毎回確認
+    """
+    config = load_config()
+
     try:
-        config = configparser.ConfigParser()
-
-        # 'config.ini' をUTF-8として読み込む
-        with open('config.ini', 'r', encoding='utf-8') as configfile:
-            config.read_file(configfile)
-
-        # デフォルトのAPIキーを取得
-        default_api_key = config['DEFAULT']['preload']
-
-        return default_api_key
-
-    except:
+        return int(config["DEFAULT"]["preload"])
+    except (KeyError, ValueError):
         return 0
 
-def load_config1():
-    import configparser
 
-    config = configparser.ConfigParser()
+def load_token():
+    """
+    Ollamaの最大生成トークン数
+    """
+    config = load_config()
 
-    # 'config.ini' をUTF-8として読み込む
-    with open('config.ini', 'r', encoding='utf-8') as configfile:
-        config.read_file(configfile)
+    try:
+        return int(config["DEFAULT"]["Max_Token"])
+    except (KeyError, ValueError):
+        return 1024
 
-    # config.iniファイルの読み込み
-    config.read('config.ini')
 
-    # プレクリアフラグを取得
-    precls = config['DEFAULT']['pre_cls']
+def load_system_prompt():
+    """
+    システムプロンプト
+    """
+    config = load_config()
 
-    return precls
+    try:
+        return config["DEFAULT"]["system_prompt"]
+    except KeyError:
+        return "私のソフトウェアはあなたに代わってユーザー情報を保持します。"
 
-def load_Token():
-    import configparser
 
-    config = configparser.ConfigParser()
+# =========================================================
+# 会話履歴
+# =========================================================
 
-    # 'config.ini' をUTF-8として読み込む
-    with open('config.ini', 'r', encoding='utf-8') as configfile:
-        config.read_file(configfile)
+def save_chat(messages):
+    """
+    会話履歴全体をchat.logへ保存
+    """
 
-    # config.iniファイルの読み込み
-    config.read('config.ini')
+    try:
+        with open(CHAT_LOG_FILE, "wb") as f:
+            pickle.dump(messages, f)
 
-    # プレクリアフラグを取得
-    precls = config['DEFAULT']['Max_Token']
+    except Exception as e:
+        print("")
+        print(" 会話履歴の保存中にエラーが発生しました。")
+        print(f" {e}")
 
-    return int(precls)
 
-API_KEY = load_config()
-API_URL = 'https://api.openai.com/v1/chat/completions'
+def load_chat():
+    """
+    chat.logから会話履歴を読み込む
+    """
 
-def chat_with_gpt(prompt,v):
-    headers = {
-        'Authorization': f'Bearer {API_KEY}',
-        'Content-Type': 'application/json'
-    }
-        
+    if not os.path.isfile(CHAT_LOG_FILE):
+        return [
+            {
+                "role": "system",
+                "content": load_system_prompt()
+            }
+        ]
+
+    try:
+        with open(CHAT_LOG_FILE, "rb") as f:
+            messages = pickle.load(f)
+
+        if not isinstance(messages, list):
+            raise ValueError("chat.logの形式が正しくありません。")
+
+        return messages
+
+    except Exception as e:
+        print("")
+        print(" chat.logの読み込みに失敗しました。")
+        print(f" {e}")
+        print("")
+        print(" 新しい会話として開始します。")
+
+        return [
+            {
+                "role": "system",
+                "content": load_system_prompt()
+            }
+        ]
+
+
+def new_chat():
+    """
+    新規会話
+    """
+
+    return [
+        {
+            "role": "system",
+            "content": load_system_prompt()
+        }
+    ]
+
+
+# =========================================================
+# Ollama確認
+# =========================================================
+
+def check_ollama():
+    """
+    Ollamaサーバーが起動しているか確認
+    """
+
+    try:
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=5
+        )
+
+        if response.status_code == 200:
+            return True
+
+        return False
+
+    except requests.exceptions.RequestException:
+        return False
+
+
+def check_model():
+    """
+    指定されたモデルがOllamaに存在するか確認
+    """
+
+    model = load_model()
+
+    try:
+        response = requests.get(
+            "http://localhost:11434/api/tags",
+            timeout=5
+        )
+
+        if response.status_code != 200:
+            return False
+
+        data = response.json()
+
+        for item in data.get("models", []):
+            name = item.get("name", "")
+
+            if name == model:
+                return True
+
+        return False
+
+    except requests.exceptions.RequestException:
+        return False
+
+
+# =========================================================
+# Ollama チャット
+# =========================================================
+
+def chat_with_ollama(messages):
+    """
+    Ollamaへ会話履歴を送信
+    """
+
+    api_url = load_ollama_url()
+    model = load_model()
+
     data = {
-        'model': 'gpt-4',
-        'messages': load_chat(v,prompt),
-        'max_tokens': load_Token()
+        "model": model,
+        "messages": messages,
+        "stream": False,
+
+        "options": {
+            "num_predict": load_token()
+        }
     }
 
-    response = requests.post(API_URL, headers=headers, json=data)
-    if response.status_code == 429:
-        print(" Error 429: エラーが発生しました。エラー情報は次の通りです。")
-        print(" このエラーメッセージは、お客様がAPIの月間最大使用量（ハードリミット）に達したことを示します。\nこれは、お客様のプランに割り当てられたクレジットまたはユニットをすべて消費し、課金サイクルの限界に達したことを意味します。")
-        print("\n 可能であるならば、APIキー管理アカウントにクレジットを追加してソフトウェアを再起動してください。")
-        input(" >> ")
-        sys.exit()
-    if response.status_code == 200:
-        save_chat(messages=[{'role': 'user', 'content': prompt}],new_message={'role':'assistant','content':response.json()['choices'][0]['message']['content']})
-        return response.json()['choices'][0]['message']['content']
-    else:
-        print(f"Error: {response.status_code}, {response.text}")
+    try:
+        response = requests.post(
+            api_url,
+            json=data,
+            timeout=None
+        )
+
+    except requests.exceptions.ConnectionError:
+        print("")
+        print(" Ollamaに接続できませんでした。")
+        print("")
+        print(" Ollamaが起動しているか確認してください。")
+        print("")
+        print(" 例:")
+        print(" ollama serve")
         return None
 
-def main():
-    if load_preload()==0:
+    except requests.exceptions.RequestException as e:
         print("")
-        v=input(" これまでの会話履歴を読み込みますか？ ( Y or n) >> ")
+        print(" Ollamaとの通信中にエラーが発生しました。")
+        print(f" {e}")
+        return None
+
+
+    if response.status_code == 200:
+
+        try:
+            result = response.json()
+
+            return result["message"]["content"]
+
+        except Exception as e:
+            print("")
+            print(" Ollamaからの応答を解析できませんでした。")
+            print(f" {e}")
+            return None
+
     else:
-        v="y"
+
+        print("")
+        print(
+            f" Error: {response.status_code}"
+        )
+
+        print(response.text)
+
+        return None
+
+
+# =========================================================
+# メイン処理
+# =========================================================
+
+BOT_NAME=load_BotName()
+def main():
+    c=0
+
+    try:
+        print(pyfiglet.figlet_format("Velwether",font="slant"))
+        print("Local AI Edition")
+        c=1
+    except:
+        pass
+    
+    if c==0:
+        print("")
+        print(" ========================================")
+        print("              Velwether")
+        print("           Local AI Edition")
+        print(" ========================================")
+    print("")
+
+    model = load_model()
+
+    print(f" 使用モデル : {model}")
+    print("")
+
+    # -----------------------------------------------------
+    # Ollama起動確認
+    # -----------------------------------------------------
+
+    print(" Ollamaとの接続を確認しています...")
+
+    if not check_ollama():
+
+        print("")
+        print(" Ollamaに接続できませんでした。")
+        print("")
+        print(" Ollamaがインストールされているか確認してください。")
+        print("")
+        print(" PowerShellで次を実行してください。")
+        print("")
+        print(" ollama serve")
+        print("")
+
+        input(" >> ")
+
+        sys.exit()
+
+    print(" Ollama接続: OK")
+
+
+    # -----------------------------------------------------
+    # モデル確認
+    # -----------------------------------------------------
+
+    if not check_model():
+
+        print("")
+        print(
+            f" モデル '{model}' がインストールされていません。"
+        )
+        print("")
+        print(" PowerShellで次を実行してください。")
+        print("")
+        print(
+            f" ollama pull {model}"
+        )
+        print("")
+
+        input(" >> ")
+
+        sys.exit()
+
+
+    print(f" モデル確認: {model} OK")
+    print("")
+
+
+    # -----------------------------------------------------
+    # 会話履歴
+    # -----------------------------------------------------
+
+    if load_preload() == 1:
+
+        messages = load_chat()
+
+        if os.path.isfile(CHAT_LOG_FILE):
+            print(" 前回の会話履歴を読み込みました。")
+
+    else:
+
+        if os.path.isfile(CHAT_LOG_FILE):
+
+            print("")
+            v = input(
+                " これまでの会話履歴を読み込みますか？ (Y/n) >> "
+            )
+
+            if v.lower() in ["", "y", "yes"]:
+                messages = load_chat()
+
+            else:
+                messages = new_chat()
+
+        else:
+            messages = new_chat()
+
+
+    # -----------------------------------------------------
+    # 操作説明
+    # -----------------------------------------------------
 
     print("")
-    print(" ボットに話しかけてみてください！\n 終了するには 'exit' と入力してください。")
+    print(" ボットに話しかけてみてください！")
     print("")
-    print(" (このソフトウェアはAPI仕様やボットの返答の都合によりユーザー情報等を記憶することができない場合があります。)")
+    print(" 終了       : exit")
+    print(" 履歴削除   : clear")
+    print(" 履歴表示   : history")
+    print(" モデル表示 : model")
     print("")
+    print(
+        " 会話履歴はローカルのchat.logに保存されます。"
+    )
+    print("")
+
+
+    # -----------------------------------------------------
+    # チャットループ
+    # -----------------------------------------------------
+
     while True:
-        user_input = input("\n あなた: ")
-        if user_input.lower() == 'exit':
-            print("会話を終了します。")
+
+        try:
+
+            user_input = input("\n あなた: ").strip()
+
+        except KeyboardInterrupt:
+
+            print("")
+            print("")
+            print(" 会話を終了します。")
+
             break
 
-        response = chat_with_gpt(user_input,v)
-        response=response.replace("。","。\n ")
-        if response:
-            print(f"\n ボット: {response}")
+
+        # -------------------------------------------------
+        # 空入力
+        # -------------------------------------------------
+
+        if not user_input:
+            continue
+
+
+        # -------------------------------------------------
+        # 終了
+        # -------------------------------------------------
+
+        if user_input.lower() == "exit":
+
+            print("")
+            print(" 会話を終了します。")
+
+            break
+
+
+        # -------------------------------------------------
+        # 履歴削除
+        # -------------------------------------------------
+
+        if user_input.lower() == "clear":
+
+            messages = new_chat()
+
+            if os.path.isfile(CHAT_LOG_FILE):
+
+                try:
+                    os.remove(CHAT_LOG_FILE)
+
+                except Exception as e:
+                    print(
+                        f" 履歴削除エラー: {e}"
+                    )
+
+                    continue
+
+            print("")
+            print(" 会話履歴を削除しました。")
+
+            continue
+
+
+        # -------------------------------------------------
+        # 履歴表示
+        # -------------------------------------------------
+
+        if user_input.lower() == "history":
+
+            print("")
+            print(" ===== 会話履歴 =====")
+
+            for message in messages:
+
+                role = message.get("role", "")
+                content = message.get("content", "")
+
+                if role == "system":
+                    continue
+
+                if role == "user":
+                    print("")
+                    print(f" あなた: {content}")
+
+                elif role == "assistant":
+                    print("")
+                    print(f" ボット: {content}")
+
+            print("")
+            print(" ====================")
+
+            continue
+
+
+        # -------------------------------------------------
+        # モデル情報
+        # -------------------------------------------------
+
+        if user_input.lower() == "model":
+
+            print("")
+            print(
+                f" 使用中モデル: {load_model()}"
+            )
+
+            continue
+
+
+        # -------------------------------------------------
+        # ユーザーメッセージ追加
+        # -------------------------------------------------
+
+        messages.append(
+            {
+                "role": "user",
+                "content": user_input
+            }
+        )
+
+
+        # -------------------------------------------------
+        # Ollama呼び出し
+        # -------------------------------------------------
+
+        print("")
+        print(" 考え中...")
+
+        response = chat_with_ollama(messages)
+
+        if response is None:
+
+            # APIエラー時はユーザー入力を履歴から外す
+            if (
+                len(messages) > 0
+                and messages[-1]["role"] == "user"
+            ):
+                messages.pop()
+
+            continue
+
+
+        # -------------------------------------------------
+        # AI応答を履歴へ追加
+        # -------------------------------------------------
+
+        messages.append(
+            {
+                "role": "assistant",
+                "content": response
+            }
+        )
+
+
+        # -------------------------------------------------
+        # 会話履歴保存
+        # -------------------------------------------------
+
+        save_chat(messages)
+
+
+        # -------------------------------------------------
+        # 表示
+        # -------------------------------------------------
+
+        display_response = response.replace(
+            "。",
+            "。\n "
+        )
+
+        print("")
+        print(
+            f" {BOT_NAME}: {display_response}"
+        )
+
+
+# =========================================================
+# 起動
+# =========================================================
 
 if __name__ == "__main__":
     main()
