@@ -1,7 +1,6 @@
 import requests
 import os
 import sys
-import pickle
 import configparser
 import shutil
 import pyfiglet
@@ -14,35 +13,116 @@ import traceback
 os.system("cls" if os.name == "nt" else "clear")
 
 
+import pyttsx3
+
+def load_config():
+    config = configparser.ConfigParser()
+
+    with open(CONFIG_FILE, "r", encoding="utf-8") as configfile:
+        config.read_file(configfile)
+
+    return config
+
+def load_DVDmode():
+    """
+    DVDモードの有効無効を変更
+    """
+    config = load_config()
+
+    try:
+        return int(config["DEFAULT"]["dvd_mode"])
+    except KeyError:
+        return 0  
+
+def setup_dropbox_oauth():
+    import dropbox
+
+    config = load_dropbox_config()
+
+    app_key = config["DROPBOX"]["app_key"].strip()
+
+    auth_flow = dropbox.DropboxOAuth2FlowNoRedirect(
+        app_key,
+        token_access_type="offline",
+        use_pkce=True
+    )
+
+    authorize_url = auth_flow.start()
+
+    import webbrowser
+
+    webbrowser.open(authorize_url)
+
+    auth_code = input(
+        " 表示された認証コードを入力してください >> "
+    ).strip()
+
+    result = auth_flow.finish(auth_code)
+
+    refresh_token = result.refresh_token
+
+    config["DROPBOX"]["refresh_token"] = refresh_token
+
+    with open(
+        DROPBOX_CONFIG_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+        config.write(f)
+
+    print("")
+    print(" Dropbox認証が完了しました。")
+
+    return refresh_token
+
+def get_appdata_dir():
+    base = os.getenv("APPDATA") or os.path.expanduser("~")
+    folder = os.path.join(base, "Velwether")
+    os.makedirs(folder, exist_ok=True)
+    return folder
+
 # =========================================================
 # 定数
 # =========================================================
 
-
+APP_DATA=get_appdata_dir()
 CONFIG_DIR = "config"
 DATA_DIR = "data"
 LOG_DIR ="logs"
 
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
-DROPBOX_CONFIG_FILE = os.path.join(CONFIG_DIR, "dropbox.ini")
-CHAT_LOG_FILE = os.path.join(DATA_DIR, "memory.vlm")
-LOG_FILE = os.path.join(LOG_DIR, "message.log")
+if load_DVDmode()==0:
+    DROPBOX_CONFIG_FILE = os.path.join(CONFIG_DIR, "dropbox.ini")
+    CHAT_LOG_FILE = os.path.join(DATA_DIR, "memory.vlm")
+    LOG_FILE = os.path.join(LOG_DIR, "message.log")
+else:
+    
+    LOG_FILE = os.path.join(APP_DATA, "message.log")
+    CHAT_LOG_FILE = os.path.join(APP_DATA, "memory.vlm")
+    if os.path.isfile(os.path.join(CONFIG_DIR, "dropbox.ini")) and not os.path.isfile(os.path.join(APP_DATA, "dropbox.ini")):
+        shutil.copyfile(
+            os.path.join(CONFIG_DIR, "dropbox.ini"),
+            os.path.join(APP_DATA, "dropbox.ini")
+        )
+
+    if (os.path.isfile(os.path.join(CONFIG_DIR, "config.ini")) and not os.path.isfile(os.path.join(APP_DATA, "config.ini"))):
+        shutil.copyfile(
+            os.path.join(CONFIG_DIR, "config.ini"),
+            os.path.join(APP_DATA, "config.ini")
+            )
+    DROPBOX_CONFIG_FILE = os.path.join(APP_DATA, "dropbox.ini")
+    CONFIG_FILE = os.path.join(APP_DATA, "config.ini")
+
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
-os.makedirs(DATA_DIR, exist_ok=True)
-os.makedirs(LOG_DIR, exist_ok=True)
+if load_DVDmode()==0:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(LOG_DIR, exist_ok=True)
 
 # =========================================================
 # 設定データなどの移行
 # =========================================================
 
-def write_log(messages):
-    import json
-
-    with open(LOG_FILE, "a", encoding="utf-8") as f:
-        f.write("\n--- messages[-3:] ---\n")
-        f.write(json.dumps(messages[-3:], ensure_ascii=False, indent=2))
-        f.write("\n")
 
 if os.path.isfile("config.ini"):
     shutil.copyfile("config.ini",CONFIG_FILE)
@@ -82,14 +162,27 @@ if not os.path.isfile(CONFIG_FILE):
 # 設定ファイル読み込み
 # =========================================================
 
-def load_config():
-    config = configparser.ConfigParser()
+def load_voice():
+    """
+    合成音声の有効無効を変更
+    """
+    config = load_config()
 
-    with open(CONFIG_FILE, "r", encoding="utf-8") as configfile:
-        config.read_file(configfile)
+    try:
+        return int(config["DEFAULT"]["voice_enable"])
+    except KeyError:
+        return 0
 
-    return config
+def load_log():
+    """
+    ログの有効無効を変更
+    """
+    config = load_config()
 
+    try:
+        return int(config["DEFAULT"]["log_enable"])
+    except KeyError:
+        return 0
 
 def load_model():
     """
@@ -169,6 +262,31 @@ def load_system_prompt():
         f"{base_prompt}"
     )
 
+LOG_ENABLD=load_log()
+VOICE_ENABLD=load_voice()
+# ========================================================
+## ログ出力
+#========================================================
+def write_log(messages):
+    if LOG_ENABLD==0:
+        return 
+    import json
+
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write("\n--- messages[-3:] ---\n")
+        f.write(json.dumps(messages[-3:], ensure_ascii=False, indent=2))
+        f.write("\n")
+
+#========================================================
+# ボイス設定
+#========================================================
+
+if VOICE_ENABLD==1:
+    engine = pyttsx3.init()
+
+    voices = engine.getProperty("voices")
+
+    engine.setProperty("voice", voices[0].id)
 
 # =========================================================
 # Dropbox設定 / 記憶同期
@@ -199,15 +317,6 @@ def load_dropbox_enabled():
         return False
 
 
-def load_dropbox_token():
-    config = load_dropbox_config()
-
-    try:
-        return config["DROPBOX"]["access_token"].strip()
-    except KeyError:
-        return ""
-
-
 def load_dropbox_memory_path():
     config = load_dropbox_config()
 
@@ -217,29 +326,55 @@ def load_dropbox_memory_path():
     except KeyError:
         return "/Velwether/memory.vlm"
 
-
 def get_dropbox_client():
-    """
-    Dropbox SDKは同期を有効にした時だけ読み込む。
-    そのためdropboxパッケージ未導入でも、
-    Dropbox無効時はVelwether本体を起動できる。
-    """
+    import dropbox
+
+    config = load_dropbox_config()
+
     try:
-        import dropbox
-    except ImportError as e:
-        raise RuntimeError(
-            "Dropbox SDKがインストールされていません。"
-            " 'pip install dropbox' を実行してください。"
-        ) from e
+        app_key = config["DROPBOX"]["app_key"].strip()
+    except KeyError:
+        app_key = ""
 
-    token = load_dropbox_token()
+    try:
+        refresh_token = config["DROPBOX"]["refresh_token"].strip()
+    except KeyError:
+        refresh_token = ""
 
-    if not token:
-        raise RuntimeError(
-            "config/dropbox.ini にDropboxアクセストークンが設定されていません。"
-        )
+    if not app_key:
+        print("")
+        print(" Dropbox App Keyが設定されていません。")
+        app_key = input(
+            " Dropbox App Keyを入力してください >> "
+        ).strip()
 
-    return dropbox.Dropbox(token)
+        if not app_key:
+            raise RuntimeError(
+                "Dropbox App Keyが入力されませんでした。"
+            )
+
+        if "DROPBOX" not in config:
+            config["DROPBOX"] = {}
+
+        config["DROPBOX"]["app_key"] = app_key
+
+        with open(
+            DROPBOX_CONFIG_FILE,
+            "w",
+            encoding="utf-8"
+        ) as f:
+            config.write(f)
+
+        print("")
+        print(" Dropbox App Keyを保存しました。")
+
+    if not refresh_token:
+        refresh_token = setup_dropbox_oauth()
+
+    return dropbox.Dropbox(
+        oauth2_refresh_token=refresh_token,
+        app_key=app_key
+    )
 
 
 def ensure_dropbox_parent(dbx, remote_path):
@@ -356,26 +491,43 @@ def upload_memory_to_dropbox(show_error=False):
 def download_memory_from_dropbox(dbx, metadata):
     """
     Dropboxのmemory.vlmを一時ファイルへ取得し、
-    pickleとして読めることを確認してからローカルを置換する。
+    JSONとして読めることを確認してからローカルを置換する。
     """
+    import json
+
     remote_path = load_dropbox_memory_path()
     temp_file = CHAT_LOG_FILE + ".tmp"
 
     _, response = dbx.files_download(remote_path)
 
+    # Dropboxから取得した内容を一時保存
     with open(temp_file, "wb") as f:
         f.write(response.content)
 
-    # 壊れたデータでローカル記憶を上書きしない
-    with open(temp_file, "rb") as f:
-        test_messages = pickle.load(f)
+    try:
+        # 壊れたデータでローカル記憶を上書きしない
+        with open(temp_file, "r", encoding="utf-8") as f:
+            test_messages = json.load(f)
 
-    if not isinstance(test_messages, list):
-        raise ValueError(
-            "Dropbox上のmemory.vlmの形式が正しくありません。"
-        )
+        if not isinstance(test_messages, list):
+            raise ValueError(
+                "Dropbox上のmemory.vlmの形式が正しくありません。"
+            )
 
-    os.replace(temp_file, CHAT_LOG_FILE)
+        # 最低限、各要素が辞書かも確認
+        for message in test_messages:
+            if not isinstance(message, dict):
+                raise ValueError(
+                    "Dropbox上のmemory.vlmのメッセージ形式が正しくありません。"
+                )
+
+        os.replace(temp_file, CHAT_LOG_FILE)
+
+    except Exception:
+        # 検証失敗時はtmpを残さない
+        if os.path.isfile(temp_file):
+            os.remove(temp_file)
+        raise
 
     remote_modified = _to_utc(
         getattr(metadata, "client_modified", None)
@@ -465,13 +617,19 @@ def sync_memory():
 
 def save_chat(messages):
     """
-    会話履歴全体をmemory.vlmへ保存する。
+    会話履歴全体をmemory.vlmへJSON形式で保存する。
     Dropbox同期が有効なら、ローカル保存後にクラウドへ同期する。
     """
+    import json
 
     try:
-        with open(CHAT_LOG_FILE, "wb") as f:
-            pickle.dump(messages, f)
+        with open(CHAT_LOG_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                messages,
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
 
     except Exception as e:
         print("")
@@ -479,14 +637,14 @@ def save_chat(messages):
         print(f" {e}")
         return
 
-    # ネット未接続などで失敗しても会話は継続
     upload_memory_to_dropbox(show_error=False)
 
 
 def load_chat():
     """
-    memory.vlmから会話履歴を読み込む
+    memory.vlmからJSON形式の会話履歴を読み込む
     """
+    import json
 
     if not os.path.isfile(CHAT_LOG_FILE):
         return [
@@ -497,11 +655,19 @@ def load_chat():
         ]
 
     try:
-        with open(CHAT_LOG_FILE, "rb") as f:
-            messages = pickle.load(f)
+        with open(CHAT_LOG_FILE, "r", encoding="utf-8") as f:
+            messages = json.load(f)
 
         if not isinstance(messages, list):
-            raise ValueError("memory.vlmの形式が正しくありません。")
+            raise ValueError(
+                "memory.vlmの形式が正しくありません。"
+            )
+
+        for message in messages:
+            if not isinstance(message, dict):
+                raise ValueError(
+                    "memory.vlmのメッセージ形式が正しくありません。"
+                )
 
         return messages
 
@@ -663,14 +829,17 @@ def chat_with_ollama(messages):
 # =========================================================
 # メイン処理
 # =========================================================
-
-BOT_NAME=load_BotName()
+DVD_MODE = load_DVDmode()
+BOT_NAME = load_BotName()
 def main():
     c=0
 
     try:
         print(pyfiglet.figlet_format("Velwether",font="slant"))
         print("Local AI Edition")
+        if DVD_MODE == 1:
+            print("For DVD Mode")
+        print("")
         c=1
     except:
         pass
@@ -959,7 +1128,7 @@ def main():
             "。\n "
         )
         
-        display_response = response.replace(
+        display_response = display_response.replace(
                     "**",
                     ""
                 )
@@ -968,6 +1137,9 @@ def main():
         print(
             f" {BOT_NAME}: {display_response}"
         )
+        if VOICE_ENABLD==1:
+            engine.say(display_response)
+            engine.runAndWait()
 
 
 # =========================================================
@@ -975,4 +1147,7 @@ def main():
 # =========================================================
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    finally:
+        sys.exit(0)

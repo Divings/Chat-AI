@@ -1,4 +1,4 @@
 @echo off
 cd /d ./
-pyinstaller Velwether.py --onefile --collect-data pyfiglet
+pyinstaller Velwether.py --onefile --collect-data pyfiglet -i icon.ico
 pause

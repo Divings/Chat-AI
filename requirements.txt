@@ -1,0 +1,4 @@
+requests
+pyfiglet
+pyttsx3
+dropbox
