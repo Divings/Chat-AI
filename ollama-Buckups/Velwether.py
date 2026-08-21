@@ -5,7 +5,7 @@ import pickle
 import configparser
 import shutil
 import pyfiglet
-import traceback
+
 
 # =========================================================
 # 画面クリア
@@ -23,7 +23,6 @@ CONFIG_DIR = "config"
 DATA_DIR = "data"
 
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
-DROPBOX_CONFIG_FILE = os.path.join(CONFIG_DIR, "dropbox.ini")
 CHAT_LOG_FILE = os.path.join(DATA_DIR, "memory.vlm")
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
@@ -42,11 +41,11 @@ if os.path.isfile("config.ini"):
 
 if os.path.isfile("memory.vlm"):
     i=input(" 既存の記憶データを移行しますか? ( Y or N ) >> ")
-    if i.lower()=="y":
+    if i.lower()=="Y":
         if os.path.isfile(CHAT_LOG_FILE):
             print("")
             d=input(" 記憶データが既に存在します。上書きしますか? ( Y or N ) >> ")
-            if d.lower()=="y":
+            if i.lower()=="Y":
                 shutil.copyfile("memory.vlm",CHAT_LOG_FILE)
                 os.remove("memory.vlm")
             else:
@@ -160,304 +159,13 @@ def load_system_prompt():
         f"{base_prompt}"
     )
 
-
-# =========================================================
-# Dropbox設定 / 記憶同期
-# =========================================================
-
-def load_dropbox_config():
-    """
-    config/dropbox.ini を読み込む。
-    ファイルが無い場合はDropbox同期を無効として扱う。
-    """
-    config = configparser.ConfigParser()
-
-    if not os.path.isfile(DROPBOX_CONFIG_FILE):
-        return config
-
-    with open(DROPBOX_CONFIG_FILE, "r", encoding="utf-8") as configfile:
-        config.read_file(configfile)
-
-    return config
-
-
-def load_dropbox_enabled():
-    config = load_dropbox_config()
-
-    try:
-        return config["DROPBOX"].getboolean("enabled")
-    except (KeyError, ValueError):
-        return False
-
-
-def load_dropbox_token():
-    config = load_dropbox_config()
-
-    try:
-        return config["DROPBOX"]["access_token"].strip()
-    except KeyError:
-        return ""
-
-
-def load_dropbox_memory_path():
-    config = load_dropbox_config()
-
-    try:
-        path = config["DROPBOX"]["memory_path"].strip()
-        return path if path else "/Velwether/memory.vlm"
-    except KeyError:
-        return "/Velwether/memory.vlm"
-
-
-def get_dropbox_client():
-    """
-    Dropbox SDKは同期を有効にした時だけ読み込む。
-    そのためdropboxパッケージ未導入でも、
-    Dropbox無効時はVelwether本体を起動できる。
-    """
-    try:
-        import dropbox
-    except ImportError as e:
-        raise RuntimeError(
-            "Dropbox SDKがインストールされていません。"
-            " 'pip install dropbox' を実行してください。"
-        ) from e
-
-    token = load_dropbox_token()
-
-    if not token:
-        raise RuntimeError(
-            "config/dropbox.ini にDropboxアクセストークンが設定されていません。"
-        )
-
-    return dropbox.Dropbox(token)
-
-
-def ensure_dropbox_parent(dbx, remote_path):
-    """
-    /Velwether/memory.vlm のような保存先について、
-    必要な親フォルダをDropbox側に作成する。
-    """
-    normalized = remote_path.replace("\\", "/")
-
-    if not normalized.startswith("/"):
-        normalized = "/" + normalized
-
-    parts = [part for part in normalized.split("/") if part]
-
-    # 最後はファイル名なので除外
-    if len(parts) <= 1:
-        return
-
-    current = ""
-
-    for part in parts[:-1]:
-        current += "/" + part
-
-        try:
-            dbx.files_create_folder_v2(current)
-        except Exception:
-            # 既存フォルダの場合などはそのまま続行
-            pass
-
-
-def _to_utc(dt):
-    """
-    Dropbox SDKが返すnaive datetimeをUTCとして正規化する。
-    """
-    from datetime import timezone
-
-    if dt is None:
-        return None
-
-    if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
-
-    return dt.astimezone(timezone.utc)
-
-
-def get_local_memory_modified():
-    if not os.path.isfile(CHAT_LOG_FILE):
-        return None
-
-    from datetime import datetime, timezone
-
-    return datetime.fromtimestamp(
-        os.path.getmtime(CHAT_LOG_FILE),
-        tz=timezone.utc
-    )
-
-
-def get_dropbox_memory_metadata(dbx):
-    try:
-        return dbx.files_get_metadata(
-            load_dropbox_memory_path()
-        )
-    except Exception:
-        return None
-
-
-def upload_memory_to_dropbox(show_error=False):
-    """
-    ローカルのmemory.vlmをDropboxへ上書きアップロードする。
-    失敗してもローカル保存は維持する。
-    """
-    if not load_dropbox_enabled():
-        return False
-
-    if not os.path.isfile(CHAT_LOG_FILE):
-        return False
-
-    try:
-        import dropbox
-
-        dbx = get_dropbox_client()
-        remote_path = load_dropbox_memory_path()
-
-        ensure_dropbox_parent(dbx, remote_path)
-
-        local_modified = get_local_memory_modified()
-
-        with open(CHAT_LOG_FILE, "rb") as f:
-            dbx.files_upload(
-                f.read(),
-                remote_path,
-                mode=dropbox.files.WriteMode.overwrite,
-                client_modified=(
-                    local_modified.replace(tzinfo=None)
-                    if local_modified is not None
-                    else None
-                ),
-                mute=True
-            )
-
-        return True
-
-    except Exception as e:
-        if show_error:
-            
-            print("")
-            print(" Dropboxへの記憶データ同期に失敗しました。")
-            print(f" {type(e).__name__}: {e}")
-            traceback.print_exc()
-
-        return False
-
-
-def download_memory_from_dropbox(dbx, metadata):
-    """
-    Dropboxのmemory.vlmを一時ファイルへ取得し、
-    pickleとして読めることを確認してからローカルを置換する。
-    """
-    remote_path = load_dropbox_memory_path()
-    temp_file = CHAT_LOG_FILE + ".tmp"
-
-    _, response = dbx.files_download(remote_path)
-
-    with open(temp_file, "wb") as f:
-        f.write(response.content)
-
-    # 壊れたデータでローカル記憶を上書きしない
-    with open(temp_file, "rb") as f:
-        test_messages = pickle.load(f)
-
-    if not isinstance(test_messages, list):
-        raise ValueError(
-            "Dropbox上のmemory.vlmの形式が正しくありません。"
-        )
-
-    os.replace(temp_file, CHAT_LOG_FILE)
-
-    remote_modified = _to_utc(
-        getattr(metadata, "client_modified", None)
-    )
-
-    if remote_modified is not None:
-        timestamp = remote_modified.timestamp()
-        os.utime(CHAT_LOG_FILE, (timestamp, timestamp))
-
-
-def sync_memory():
-    """
-    起動時にローカルとDropboxのmemory.vlmを比較する。
-
-    Dropboxが新しい:
-        Dropbox -> ローカル
-    ローカルが新しい:
-        ローカル -> Dropbox
-    片方だけ存在:
-        存在する側をもう片方へ同期
-
-    ネット未接続などでDropboxへ接続できない場合は
-    ローカルだけでそのまま起動する。
-    """
-    if not load_dropbox_enabled():
-        return
-
-    try:
-        dbx = get_dropbox_client()
-
-        local_modified = get_local_memory_modified()
-        remote_metadata = get_dropbox_memory_metadata(dbx)
-
-        remote_modified = None
-
-        if remote_metadata is not None:
-            remote_modified = _to_utc(
-                getattr(remote_metadata, "client_modified", None)
-            )
-
-        # 両方ない
-        if local_modified is None and remote_metadata is None:
-            return
-
-        # Dropboxだけある
-        if local_modified is None and remote_metadata is not None:
-            print(" Dropboxから記憶データを取得しています...")
-            download_memory_from_dropbox(dbx, remote_metadata)
-            print(" Dropboxの記憶データを取得しました。")
-            return
-
-        # ローカルだけある
-        if local_modified is not None and remote_metadata is None:
-            print(" ローカルの記憶データをDropboxへ同期しています...")
-            if upload_memory_to_dropbox(show_error=True):
-                print(" Dropboxへの同期が完了しました。")
-            return
-
-        # 更新日時が取れない場合はローカル優先
-        if remote_modified is None:
-            upload_memory_to_dropbox(show_error=True)
-            return
-
-        # Dropboxの方が新しい
-        if remote_modified > local_modified:
-            print(" Dropboxに新しい記憶データがあります。")
-            download_memory_from_dropbox(dbx, remote_metadata)
-            print(" Dropboxの記憶データを使用します。")
-
-        # ローカルの方が新しい
-        elif local_modified > remote_modified:
-            print(" ローカルの記憶データの方が新しいためDropboxへ同期します。")
-            upload_memory_to_dropbox(show_error=True)
-
-        else:
-            print(" Dropboxとの記憶データは同期済みです。")
-
-    except Exception as e:
-        print("")
-        print(" Dropboxに接続できないためローカルの記憶データを使用します。")
-        print(f" {e}")
-
-
 # =========================================================
 # 会話履歴
 # =========================================================
 
 def save_chat(messages):
     """
-    会話履歴全体をmemory.vlmへ保存する。
-    Dropbox同期が有効なら、ローカル保存後にクラウドへ同期する。
+    会話履歴全体をmemory.vlmへ保存
     """
 
     try:
@@ -468,10 +176,6 @@ def save_chat(messages):
         print("")
         print(" 会話履歴の保存中にエラーが発生しました。")
         print(f" {e}")
-        return
-
-    # ネット未接続などで失敗しても会話は継続
-    upload_memory_to_dropbox(show_error=False)
 
 
 def load_chat():
@@ -730,12 +434,6 @@ def main():
 
 
     # -----------------------------------------------------
-    # Dropbox記憶同期
-    # -----------------------------------------------------
-
-    sync_memory()
-
-    # -----------------------------------------------------
     # 会話履歴
     # -----------------------------------------------------
 
@@ -778,7 +476,7 @@ def main():
     print(" モデル表示 : model")
     print("")
     print(
-        " 会話履歴は data/memory.vlm に保存され、Dropbox同期が有効な場合はクラウドにも保存されます。"
+        " 会話履歴はローカルのmemory.vlmに保存されます。"
     )
     print("")
 
@@ -830,10 +528,17 @@ def main():
 
             messages = new_chat()
 
-            # 空の会話履歴を保存してDropbox側にも反映する。
-            # ローカルだけ削除すると次回起動時にDropboxから
-            # 古い履歴が復元されてしまうため。
-            save_chat(messages)
+            if os.path.isfile(CHAT_LOG_FILE):
+
+                try:
+                    os.remove(CHAT_LOG_FILE)
+
+                except Exception as e:
+                    print(
+                        f" 履歴削除エラー: {e}"
+                    )
+
+                    continue
 
             print("")
             print(" 会話履歴を削除しました。")
@@ -864,7 +569,7 @@ def main():
 
                 elif role == "assistant":
                     print("")
-                    print(f" {BOT_NAME}: {content}")
+                    print(f" ボット: {content}")
 
             print("")
             print(" ====================")
