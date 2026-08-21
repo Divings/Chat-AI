@@ -21,19 +21,28 @@ os.system("cls" if os.name == "nt" else "clear")
 
 CONFIG_DIR = "config"
 DATA_DIR = "data"
+LOG_DIR ="logs"
 
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.ini")
 DROPBOX_CONFIG_FILE = os.path.join(CONFIG_DIR, "dropbox.ini")
 CHAT_LOG_FILE = os.path.join(DATA_DIR, "memory.vlm")
+LOG_FILE = os.path.join(LOG_DIR, "message.log")
 
 os.makedirs(CONFIG_DIR, exist_ok=True)
 os.makedirs(DATA_DIR, exist_ok=True)
-
+os.makedirs(LOG_DIR, exist_ok=True)
 
 # =========================================================
 # 設定データなどの移行
 # =========================================================
 
+def write_log(messages):
+    import json
+
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write("\n--- messages[-3:] ---\n")
+        f.write(json.dumps(messages[-3:], ensure_ascii=False, indent=2))
+        f.write("\n")
 
 if os.path.isfile("config.ini"):
     shutil.copyfile("config.ini",CONFIG_FILE)
@@ -596,7 +605,9 @@ def chat_with_ollama(messages):
         "stream": False,
 
         "options": {
-            "num_predict": load_token()
+            "num_predict": load_token(),
+            "temperature": 0.8,
+            "repeat_penalty": 1.15
         }
     }
 
@@ -905,6 +916,8 @@ def main():
         print("")
         print(" 考え中...")
 
+        write_log(messages) # 会話履歴の生データを保存
+
         response = chat_with_ollama(messages)
 
         if response is None:
@@ -929,8 +942,7 @@ def main():
                 "content": response
             }
         )
-
-
+        
         # -------------------------------------------------
         # 会話履歴保存
         # -------------------------------------------------
